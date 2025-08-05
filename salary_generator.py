@@ -75,13 +75,25 @@ def is_holiday_or_weekend(date_obj):
     return False, "工作日"
 
 def parse_date_from_string(date_str):
-    """从字符串中解析日期"""
-    if pd.isna(date_str) or not date_str:
+    """
+    从字符串中解析日期
+    """
+    if pd.isna(date_str) or date_str == '':
         return None
     
+    # 如果已经是 pandas.Timestamp 或 datetime 对象，直接返回
+    if isinstance(date_str, (pd.Timestamp, datetime)):
+        return date_str
+    
+    # 转换为字符串并清理
     date_str = str(date_str).strip()
     
-    # 尝试多种日期格式
+    # 处理包含"上午"、"下午"的日期格式
+    if '上午' in date_str or '下午' in date_str:
+        # 移除时间段标识，只保留日期部分
+        date_str = date_str.replace('上午', '').replace('下午', '').strip()
+    
+    # 定义多种日期格式
     date_formats = [
         '%Y-%m-%d',
         '%Y/%m/%d',
@@ -89,26 +101,30 @@ def parse_date_from_string(date_str):
         '%m/%d/%Y',
         '%d/%m/%Y',
         '%Y-%m-%d %H:%M:%S',
-        '%Y/%m/%d %H:%M:%S'
+        '%Y/%m/%d %H:%M:%S',
+        '%Y-%m-%d %H:%M',
+        '%Y/%m/%d %H:%M',
+        '%m-%d',
+        '%m/%d'
     ]
     
+    # 尝试使用预定义格式解析
     for fmt in date_formats:
         try:
-            parsed_date = datetime.strptime(date_str, fmt).date()
+            parsed_date = datetime.strptime(date_str, fmt)
+            # 如果只有月日，补充当前年份
+            if fmt in ['%m-%d', '%m/%d']:
+                current_year = datetime.now().year
+                parsed_date = parsed_date.replace(year=current_year)
             return parsed_date
         except ValueError:
             continue
     
-    # 如果是pandas的Timestamp对象
+    # 尝试使用 pandas 的更灵活的解析
     try:
-        if hasattr(date_str, 'date'):
-            return date_str.date()
-        elif isinstance(date_str, datetime):
-            return date_str.date()
+        return pd.to_datetime(date_str, errors='raise')
     except:
-        pass
-    
-    return None
+        return None
 
 def load_salary_template():
     """加载工资表模板"""
@@ -167,24 +183,34 @@ def load_leave_data(uploaded_file):
         except Exception as e:
             st.error(f"读取休假数据时出错: {str(e)}")
             return None
-    return None
 
 def load_overtime_data(uploaded_file):
     """加载加班数据"""
     if uploaded_file is not None:
         try:
-            # 尝试不同的header位置来找到正确的数据行
-            for header_row in [0, 1, 2, 3, 4]:
-                try:
-                    df = pd.read_excel(uploaded_file, header=header_row)
-                    # 检查是否包含必要的列
-                    if '创建人' in df.columns and '时长' in df.columns:
-                        # 过滤掉空行
-                        df = df.dropna(subset=['创建人'])
-                        st.info(f"成功读取加班数据，找到 {len(df)} 条记录")
-                        return df
-                except:
-                    continue
+            # 加班表模板的数据从第三行开始，第二行是列标题
+            df = pd.read_excel(uploaded_file, header=1)  # 第二行作为列标题
+            
+            # 检查是否包含必要的列
+            if '创建人' in df.columns and '时长' in df.columns:
+                # 过滤掉空行和标题行
+                df = df.dropna(subset=['创建人'])
+                # 进一步过滤掉可能的标题行（创建人列包含"创建人"文字的行）
+                df = df[df['创建人'] != '创建人']
+                st.info(f"成功读取加班数据，找到 {len(df)} 条记录")
+                return df
+            else:
+                # 如果第二行不是正确的列标题，尝试其他行
+                for header_row in [0, 2, 3, 4]:
+                    try:
+                        df = pd.read_excel(uploaded_file, header=header_row)
+                        if '创建人' in df.columns and '时长' in df.columns:
+                            df = df.dropna(subset=['创建人'])
+                            df = df[df['创建人'] != '创建人']
+                            st.info(f"成功读取加班数据（header={header_row}），找到 {len(df)} 条记录")
+                            return df
+                    except:
+                        continue
             
             # 如果没有找到合适的格式，尝试手动解析
             df = pd.read_excel(uploaded_file, header=None)
@@ -195,6 +221,7 @@ def load_overtime_data(uploaded_file):
                     df.columns = df.iloc[i]
                     df = df.iloc[i+1:].reset_index(drop=True)
                     df = df.dropna(subset=['创建人'])
+                    df = df[df['创建人'] != '创建人']
                     st.info(f"成功解析加班数据，找到 {len(df)} 条记录")
                     return df
             
@@ -203,7 +230,6 @@ def load_overtime_data(uploaded_file):
         except Exception as e:
             st.error(f"读取加班数据时出错: {str(e)}")
             return None
-    return None
 
 def process_leave_data(result_df, leave_data):
     """处理休假数据并更新到工资表现有列中"""
@@ -304,6 +330,20 @@ def process_leave_data(result_df, leave_data):
 def process_overtime_data(result_df, overtime_data):
     """处理加班数据并更新到工资表现有列中，根据日期类型填入不同列"""
     if overtime_data is not None:
+        # 添加调试信息：显示工资表模板的列名
+        st.info(f"工资表模板包含的列: {', '.join(result_df.columns.tolist())}")
+        
+        # 添加调试信息：显示加班数据的列名和前几行数据
+        st.info(f"加班数据包含的列: {', '.join(overtime_data.columns.tolist())}")
+        st.info(f"加班数据前3行内容:")
+        st.dataframe(overtime_data.head(3))
+        
+        # 检查加班时间相关列是否存在
+        overtime_columns = ['平日累计时间', '双休日累计时间', '法定节日累计时间']
+        missing_overtime_cols = [col for col in overtime_columns if col not in result_df.columns]
+        if missing_overtime_cols:
+            st.warning(f"工资表模板缺少以下加班时间列: {', '.join(missing_overtime_cols)}")
+        
         # 检查必要的列是否存在
         required_overtime_columns = ['创建人', '时长']
         missing_columns = [col for col in required_overtime_columns if col not in overtime_data.columns]
@@ -350,23 +390,30 @@ def process_overtime_data(result_df, overtime_data):
                 
                 # 收集详细的加班记录
                 overtime_details = []
+                date_parse_failures = []  # 记录日期解析失败的情况
+                
                 for _, overtime_row in employee_overtime.iterrows():
                     overtime_hours = overtime_row['加班时间']
                     
                     # 尝试解析加班日期
                     overtime_date = None
                     date_type = "工作日"  # 默认为工作日
+                    original_date_value = None
                     
                     # 从多个可能的日期列中获取日期
                     date_columns = ['开始时间', '日期', '加班日期', '申请日期']
                     for col in date_columns:
                         if col in overtime_row and pd.notna(overtime_row[col]):
+                            original_date_value = overtime_row[col]
                             overtime_date = parse_date_from_string(overtime_row[col])
                             if overtime_date:
                                 break
                     
                     # 判断日期类型并分类统计
                     if overtime_date:
+                        # 如果是datetime对象，转换为date对象
+                        if hasattr(overtime_date, 'date'):
+                            overtime_date = overtime_date.date()
                         is_special, date_type = is_holiday_or_weekend(overtime_date)
                         if date_type == "法定节假日":
                             holiday_hours += overtime_hours
@@ -377,27 +424,96 @@ def process_overtime_data(result_df, overtime_data):
                     else:
                         # 如果无法解析日期，默认为平日加班
                         weekday_hours += overtime_hours
+                        if original_date_value is not None:
+                            date_parse_failures.append(f"员工{employee_name}: 无法解析日期'{original_date_value}'")
                     
-                    # 构建详细记录
+                    # 构建详细记录，按照用户要求的格式
                     if overtime_date:
-                        detail = f"{overtime_date.strftime('%Y-%m-%d')}({date_type}) {overtime_row['时长']}({overtime_hours}小时)"
+                        # 格式：月日时间段(时长)工作内容
+                        # 如果是datetime对象，转换为date对象
+                        if hasattr(overtime_date, 'date'):
+                            overtime_date_obj = overtime_date.date()
+                        else:
+                            overtime_date_obj = overtime_date
+                        date_str = f"{overtime_date_obj.month}月{overtime_date_obj.day}日"
+                        
+                        # 尝试获取开始和结束时间
+                        start_time = ""
+                        end_time = ""
+                        work_content = ""
+                        
+                        # 检查是否有开始时间和结束时间列
+                        if '开始时间' in overtime_row and pd.notna(overtime_row['开始时间']):
+                            try:
+                                start_dt = pd.to_datetime(overtime_row['开始时间'])
+                                start_time = start_dt.strftime('%H:%M')
+                            except:
+                                pass
+                        
+                        if '结束时间' in overtime_row and pd.notna(overtime_row['结束时间']):
+                            try:
+                                end_dt = pd.to_datetime(overtime_row['结束时间'])
+                                end_time = end_dt.strftime('%H:%M')
+                            except:
+                                pass
+                        
+                        # 尝试获取工作内容/加班原因
+                        content_columns = ['加班原因.1', '工作内容', '加班内容', '事由', '备注', '说明', '加班原因', '原因']
+                        work_content = ""
+                        found_content_column = None
+                        for col in content_columns:
+                            if col in overtime_row and pd.notna(overtime_row[col]) and str(overtime_row[col]).strip():
+                                work_content = str(overtime_row[col]).strip()
+                                found_content_column = col
+                                break
+                        
+                        # 添加调试信息：显示加班原因获取情况
+                        if work_content:
+                            st.info(f"员工{employee_name}的加班原因: '{work_content}' (来源列: {found_content_column})")
+                        else:
+                            available_content_cols = [col for col in content_columns if col in overtime_row]
+                            st.warning(f"员工{employee_name}未找到加班原因，可用列: {available_content_cols}，值: {[str(overtime_row[col]) if col in overtime_row else 'N/A' for col in available_content_cols]}")
+                        
+                        # 构建时间段字符串
+                        if start_time and end_time:
+                            time_range = f"{start_time}-{end_time}"
+                        elif start_time:
+                            time_range = f"{start_time}开始"
+                        else:
+                            time_range = ""
+                        
+                        # 组装最终格式
+                        if time_range:
+                            detail = f"{date_str}{time_range}({overtime_hours}小时)"
+                        else:
+                            detail = f"{date_str}({overtime_hours}小时)"
+                        
+                        if work_content:
+                            detail += f" {work_content}"
                     else:
-                        detail = f"{overtime_row['时长']}({overtime_hours}小时)"
+                        detail = f"日期未知({overtime_hours}小时)"
+                        if original_date_value is not None:
+                            detail += f" [原始值: {original_date_value}]"
                     
                     overtime_details.append(detail)
+                
+                # 如果有日期解析失败的情况，显示警告
+                if date_parse_failures:
+                    for failure in date_parse_failures:
+                        st.warning(failure)
                 
                 # 更新不同类型的加班时间到对应列
                 if weekday_hours > 0 and '平日累计时间' in result_df.columns:
                     current_hours = result_df.at[index, '平日累计时间'] if pd.notna(result_df.at[index, '平日累计时间']) else 0
                     result_df.at[index, '平日累计时间'] = float(current_hours) + weekday_hours
                 
-                if weekend_hours > 0 and '休息日累计时间' in result_df.columns:
-                    current_hours = result_df.at[index, '休息日累计时间'] if pd.notna(result_df.at[index, '休息日累计时间']) else 0
-                    result_df.at[index, '休息日累计时间'] = float(current_hours) + weekend_hours
+                if weekend_hours > 0 and '双休日累计时间' in result_df.columns:
+                    current_hours = result_df.at[index, '双休日累计时间'] if pd.notna(result_df.at[index, '双休日累计时间']) else 0
+                    result_df.at[index, '双休日累计时间'] = float(current_hours) + weekend_hours
                 
-                if holiday_hours > 0 and '法定节假日累计时间' in result_df.columns:
-                    current_hours = result_df.at[index, '法定节假日累计时间'] if pd.notna(result_df.at[index, '法定节假日累计时间']) else 0
-                    result_df.at[index, '法定节假日累计时间'] = float(current_hours) + holiday_hours
+                if holiday_hours > 0 and '法定节日累计时间' in result_df.columns:
+                    current_hours = result_df.at[index, '法定节日累计时间'] if pd.notna(result_df.at[index, '法定节日累计时间']) else 0
+                    result_df.at[index, '法定节日累计时间'] = float(current_hours) + holiday_hours
                 
                 # 在备注列中记录详细的加班信息，每条记录分行显示
                 if '备注' in result_df.columns:
@@ -409,12 +525,12 @@ def process_overtime_data(result_df, overtime_data):
                     if weekday_hours > 0:
                         overtime_summary.append(f"平日{weekday_hours}小时")
                     if weekend_hours > 0:
-                        overtime_summary.append(f"休息日{weekend_hours}小时")
+                        overtime_summary.append(f"双休日{weekend_hours}小时")
                     if holiday_hours > 0:
                         overtime_summary.append(f"法定节假日{holiday_hours}小时")
                     
                     summary_text = "、".join(overtime_summary)
-                    overtime_note = f"加班共{total_hours}小时({summary_text}):\n" + "\n".join([f"• {detail}" for detail in overtime_details])
+                    overtime_note = f"加班共{total_hours}小时({summary_text}): \n" + "\n".join([f" • {detail}" for detail in overtime_details])
                     
                     if current_note and current_note != 'nan':
                         result_df.at[index, '备注'] = f"{current_note}\n{overtime_note}"
@@ -430,7 +546,8 @@ def process_overtime_data(result_df, overtime_data):
             date_columns = ['开始时间', '日期', '加班日期', '申请日期']
             for col in date_columns:
                 if col in row and pd.notna(row[col]):
-                    if parse_date_from_string(row[col]):
+                    parsed_date = parse_date_from_string(row[col])
+                    if parsed_date is not None:
                         date_parsed_count += 1
                         break
         
@@ -637,6 +754,50 @@ def main():
         padding: 1rem;
         text-align: center;
         background: linear-gradient(135deg, rgba(102, 126, 234, 0.1), rgba(118, 75, 162, 0.1));
+    }
+    
+    /* 文件上传组件中文化 */
+    .stFileUploader > div > div > div > div {
+        text-align: center;
+    }
+    
+    /* 隐藏原始英文文字并添加中文 */
+    .stFileUploader > div > div > div > div::before {
+        content: "拖拽文件到此处";
+        display: block;
+        font-size: 16px;
+        color: #666;
+        margin-bottom: 10px;
+    }
+    
+    .stFileUploader > div > div > div > div > small {
+        display: none;
+    }
+    
+    .stFileUploader > div > div > div > div::after {
+        content: "支持 XLSX, XLS 格式，单个文件最大 200MB";
+        display: block;
+        font-size: 12px;
+        color: #999;
+        margin-top: 5px;
+    }
+    
+    /* 浏览文件按钮中文化 */
+    .stFileUploader button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 20px;
+        padding: 8px 20px;
+        font-weight: 500;
+    }
+    
+    .stFileUploader button::before {
+        content: "浏览文件";
+    }
+    
+    .stFileUploader button span {
+        display: none;
     }
     
     /* 侧边栏样式 */
